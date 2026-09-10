@@ -24,6 +24,7 @@
 <div class="card">
   <input type="file" id="file" accept="image/*"><br><br>
   <textarea id="paste" rows="3" placeholder="...oppure incolla qui il testo del referto"></textarea><br><br>
+  <label style="font-size:12px;font-weight:700;">Backend: <select id="be" style="border:1px solid #d8d2c6;border-radius:8px;padding:6px;font-size:12px;"><option value="auto">Auto (WebGPU, poi WASM)</option><option value="webgpu">Solo WebGPU</option><option value="wasm">Solo WASM (più stabile)</option></select></label><br><br>
   <button id="go">Analizza sul dispositivo</button>
   <p id="status">In attesa.</p>
 </div>
@@ -44,10 +45,12 @@ async function loadModel() {
   if (gen) return gen;
   const model = 'onnx-community/Qwen2.5-0.5B-Instruct';
   const cb = (p) => { if (p.status === 'progress' && p.total) set('Scarico modello: ' + Math.round(p.progress) + '%'); };
-  const attempts = [
+  const want = (document.getElementById('be') || {}).value || 'auto';
+  const all = [
     { label: 'WebGPU', device: 'webgpu', dtype: 'q4' },
     { label: 'WASM', device: 'wasm', dtype: 'q4' },
   ];
+  const attempts = want === 'auto' ? all : all.filter(a => a.label.toLowerCase() === want);
   let lastErr = null;
   for (const a of attempts) {
     try {
@@ -105,7 +108,10 @@ $('go').onclick = async () => {
 
     const prompt = 'Sei un medico specialista italiano. Analizza questo referto in MASSIMO 300 parole, con 4 sezioni intitolate esattamente: **Cosa descrive il referto**, **Deduzioni finali**, **Cosa fare adesso**, **Quando rivolgersi al pronto soccorso**. Cita i termini medici ESATTI del referto senza riformularli. NON inventare sintomi. Referto:\n' + doc;
 
-    const out = await gen([{ role: 'user', content: prompt }], { max_new_tokens: 512, temperature: 0.2, top_p: 0.9 });
+    const out = await Promise.race([
+      gen([{ role: 'user', content: prompt }], { max_new_tokens: 384, temperature: 0.2, top_p: 0.9 }),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('Timeout: oltre 4 minuti. Riapri la pagina e prova il backend WASM.')), 240000)),
+    ]);
     let txt = out[0].generated_text;
     if (Array.isArray(txt)) txt = txt[txt.length - 1].content;
 
