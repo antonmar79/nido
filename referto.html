@@ -10,7 +10,7 @@
   h1{font-size:24px} .card{background:#fff;border:1px solid #e2ddd4;border-radius:14px;padding:16px;margin-top:14px}
   #status{font-size:13px;color:#0a7272;font-weight:700;min-height:18px}
   button{background:#0a7272;color:#fff;border:0;border-radius:10px;padding:12px 18px;font-size:14px;font-weight:700;cursor:pointer}
-  textarea,input[type=file]{width:100%;box-sizing:border-box;border:1px solid #d8d2c6;border-radius:10px;padding:10px;font-size:13px;font-family:inherit}
+  textarea,input[type=file],select{width:100%;box-sizing:border-box;border:1px solid #d8d2c6;border-radius:10px;padding:10px;font-size:13px;font-family:inherit}
   .badge{display:inline-block;padding:6px 12px;border-radius:999px;color:#fff;font-size:11px;font-weight:800}
   .sec{margin-top:10px;padding:12px;border:1px solid #e2ddd4;border-radius:10px;background:#fbfaf7}
   .sec h3{margin:0 0 6px;font-size:13px} .sec p{margin:0;font-size:14px;white-space:pre-line}
@@ -24,14 +24,20 @@
 <div class="card">
   <input type="file" id="file" accept="image/*"><br><br>
   <textarea id="paste" rows="3" placeholder="...oppure incolla qui il testo del referto"></textarea><br><br>
-  <label style="font-size:12px;font-weight:700;">Backend: <select id="be" style="border:1px solid #d8d2c6;border-radius:8px;padding:6px;font-size:12px;"><option value="auto">Auto (WebGPU, poi WASM)</option><option value="webgpu">Solo WebGPU</option><option value="wasm">Solo WASM (più stabile)</option></select></label><br><br>
+  <label style="font-size:12px;font-weight:700;">Backend:
+    <select id="be">
+      <option value="auto">Auto (prova le configurazioni migliori)</option>
+      <option value="webgpu">Solo WebGPU</option>
+      <option value="wasm">Solo WASM (più stabile)</option>
+    </select>
+  </label><br><br>
   <button id="go">Analizza sul dispositivo</button>
   <p id="status">In attesa.</p>
 </div>
 
 <div id="out"></div>
 
-<small class="priv">Prima analisi: scarica il modello (~350 MB, una volta sola, poi resta in cache). Il modello è pubblico (Hugging Face); i TUOI dati no: restano qui.</small>
+<small class="priv">Prima analisi: scarica il modello (una volta sola, poi resta in cache). Il modello è pubblico (Hugging Face); i TUOI dati no: restano qui.</small>
 
 <script type="module">
 import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3';
@@ -39,29 +45,25 @@ if (typeof SharedArrayBuffer === 'undefined') { env.backends.onnx.wasm.numThread
 
 const $ = (id) => document.getElementById(id);
 const set = (t) => { $('status').textContent = t; };
-let gen = null, backend = '';
+const MODEL = 'onnx-community/Qwen2.5-0.5B-Instruct';
 
-async function loadModel() {
-  if (gen) return gen;
-  const model = 'onnx-community/Qwen2.5-0.5B-Instruct';
-  const cb = (p) => { if (p.status === 'progress' && p.total) set('Scarico modello: ' + Math.round(p.progress) + '%'); };
-  const want = (document.getElementById('be') || {}).value || 'auto';
-  const all = [
-    { label: 'WebGPU', device: 'webgpu', dtype: 'q4' },
-    { label: 'WASM', device: 'wasm', dtype: 'q4' },
-  ];
-  const attempts = want === 'auto' ? all : all.filter(a => a.label.toLowerCase() === want);
-  let lastErr = null;
-  for (const a of attempts) {
-    try {
-      set('Carico modello su ' + a.label + '...');
-      gen = await pipeline('text-generation', model, { device: a.device, dtype: a.dtype, progress_callback: cb });
-      backend = a.label;
-      return gen;
-    } catch (e) { lastErr = e; set(a.label + ' non disponibile: provo il successivo...'); }
-  }
-  throw lastErr || new Error('Nessun backend disponibile');
+const CONFIGS = [
+  { label: 'WebGPU q4', device: 'webgpu', dtype: 'q4' },
+  { label: 'WebGPU q8', device: 'webgpu', dtype: 'q8' },
+  { label: 'WASM q4', device: 'wasm', dtype: 'q4' },
+];
+const configsFor = (want) =>
+  want === 'webgpu' ? CONFIGS.filter(c => c.device === 'webgpu') :
+  want === 'wasm'   ? CONFIGS.filter(c => c.device === 'wasm') : CONFIGS;
+
+// Validatore di uscita: se non sembra linguaggio umano, NON è una risposta.
+function looksGarbage(t) {
+  const alnum = (t.match(/[\p{L}\p{N}]/gu) || []).length;
+  return t.length > 60 && (alnum / t.length) < 0.55;
 }
+
+const withTimeout = (pr, ms, msg) =>
+  Promise.race([pr, new Promise((_, rej) => setTimeout(() => rej(new Error(msg)), ms))]);
 
 async function ocr(file) {
   const worker = await Tesseract.createWorker('ita', 1, { logger: m => { if (m.progress) set('OCR sul dispositivo: ' + Math.round(m.progress * 100) + '%'); } });
@@ -103,27 +105,40 @@ $('go').onclick = async () => {
     if (file) doc = await ocr(file);
     if (!doc.trim()) { set('Nessun testo leggibile: riprova con una foto più nitida.'); return; }
 
-    await loadModel();
-    set('Analisi in corso su ' + backend + '... (nessun dato esce dal dispositivo)');
-
     const prompt = 'Sei un medico specialista italiano. Analizza questo referto in MASSIMO 300 parole, con 4 sezioni intitolate esattamente: **Cosa descrive il referto**, **Deduzioni finali**, **Cosa fare adesso**, **Quando rivolgersi al pronto soccorso**. Cita i termini medici ESATTI del referto senza riformularli. NON inventare sintomi. Referto:\n' + doc;
 
-    const out = await Promise.race([
-      gen([{ role: 'user', content: prompt }], { max_new_tokens: 384, temperature: 0.2, top_p: 0.9 }),
-      new Promise((_, rej) => setTimeout(() => rej(new Error('Timeout: oltre 4 minuti. Riapri la pagina e prova il backend WASM.')), 240000)),
-    ]);
-    let txt = out[0].generated_text;
-    if (Array.isArray(txt)) txt = txt[txt.length - 1].content;
+    let txt = null, used = '';
+    for (const c of configsFor(($('be') || {}).value || 'auto')) {
+      try {
+        set('Carico modello ' + c.label + '...');
+        const g = await pipeline('text-generation', MODEL, {
+          device: c.device, dtype: c.dtype,
+          progress_callback: (p) => { if (p.status === 'progress' && p.total) set('Scarico modello (' + c.label + '): ' + Math.round(p.progress) + '%'); },
+        });
+        set('Analisi su ' + c.label + '...');
+        const out = await withTimeout(
+          g([{ role: 'user', content: prompt }], { max_new_tokens: 384, temperature: 0.2, top_p: 0.9 }),
+          240000, 'Timeout su ' + c.label);
+        let t = out[0].generated_text;
+        if (Array.isArray(t)) t = t[t.length - 1].content;
+        if (looksGarbage(t)) { set(c.label + ': uscita corrotta (bug noto 4-bit su alcune GPU): cambio configurazione...'); continue; }
+        txt = t; used = c.label; break;
+      } catch (e) {
+        set(c.label + ' fallito: provo il successivo...');
+      }
+    }
+    if (!txt) throw new Error('Nessuna configurazione funzionante su questo dispositivo. Prova Chrome/Edge aggiornati o un altro dispositivo.');
 
     const [bLabel, bColor] = badge(doc);
     const secs = sections(txt);
     if (secs.length === 0) secs.push(['Analisi completa', txt]);
-    let html = '<div class="card"><span class="badge" style="background:' + bColor + '">' + bLabel + '</span>';
+    let html = '<div class="card"><span class="badge" style="background:' + bColor + '">' + bLabel + '</span>'
+      + '<p style="font-size:11px;color:#8a857d;margin:8px 0 0;">Backend usato: ' + used + '</p>';
     for (const [h, b] of secs) html += '<div class="sec"><h3>' + h + '</h3><p>' + b.replace(/</g, '&lt;') + '</p></div>';
     html += '<details style="margin-top:10px;"><summary style="font-size:12px;cursor:pointer;color:#0a7272;font-weight:700;">Mostra testo completo del modello</summary><p style="font-size:12px;white-space:pre-line;margin-top:6px;">' + txt.replace(/</g, '&lt;') + '</p></details>';
-    html += '<small class="priv">Backend: ' + backend + ' · Spiegazione informativa generata da AI sul tuo dispositivo: non sostituisce il medico.</small></div>';
+    html += '<small class="priv">Spiegazione informativa generata da AI sul tuo dispositivo: non sostituisce il medico.</small></div>';
     $('out').innerHTML = html;
-    set('Fatto. Tutto elaborato localmente su ' + backend + '.');
+    set('Fatto. Tutto elaborato localmente su ' + used + '.');
   } catch (e) {
     set('Errore: ' + e.message);
   }
