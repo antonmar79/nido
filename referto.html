@@ -76,11 +76,19 @@ function badge(docText) {
 
 function sections(txt) {
   const names = ['Cosa descrive il referto', 'Deduzioni finali', 'Cosa fare adesso', 'Quando rivolgersi al pronto soccorso'];
+  const headRe = (n) => new RegExp('(\\*\\*|#+\\s*)?\\s*' + n + '\\s*(\\*\\*)?\\s*:?\\s*', 'i');
   const out = [];
-  for (const n of names) {
-    const re = new RegExp('\\*\\*' + n + '\\*\\*\\s*\\n([\\s\\S]+?)(?=\\n\\*\\*|$)');
-    const m = txt.match(re);
-    if (m) out.push([n, m[1].trim()]);
+  for (let i = 0; i < names.length; i++) {
+    const m = headRe(names[i]).exec(txt);
+    if (!m) continue;
+    const start = m.index + m[0].length;
+    let end = txt.length;
+    for (let j = i + 1; j < names.length; j++) {
+      const mm = headRe(names[j]).exec(txt.slice(start));
+      if (mm) { end = start + mm.index; break; }
+    }
+    const body = txt.slice(start, end).trim();
+    if (body) out.push([names[i], body]);
   }
   return out;
 }
@@ -102,8 +110,11 @@ $('go').onclick = async () => {
     if (Array.isArray(txt)) txt = txt[txt.length - 1].content;
 
     const [bLabel, bColor] = badge(doc);
+    const secs = sections(txt);
+    if (secs.length === 0) secs.push(['Analisi completa', txt]);
     let html = '<div class="card"><span class="badge" style="background:' + bColor + '">' + bLabel + '</span>';
-    for (const [h, b] of sections(txt)) html += '<div class="sec"><h3>' + h + '</h3><p>' + b.replace(/</g, '&lt;') + '</p></div>';
+    for (const [h, b] of secs) html += '<div class="sec"><h3>' + h + '</h3><p>' + b.replace(/</g, '&lt;') + '</p></div>';
+    html += '<details style="margin-top:10px;"><summary style="font-size:12px;cursor:pointer;color:#0a7272;font-weight:700;">Mostra testo completo del modello</summary><p style="font-size:12px;white-space:pre-line;margin-top:6px;">' + txt.replace(/</g, '&lt;') + '</p></details>';
     html += '<small class="priv">Backend: ' + backend + ' · Spiegazione informativa generata da AI sul tuo dispositivo: non sostituisce il medico.</small></div>';
     $('out').innerHTML = html;
     set('Fatto. Tutto elaborato localmente su ' + backend + '.');
