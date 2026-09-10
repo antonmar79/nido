@@ -50,6 +50,7 @@ const MODEL = 'onnx-community/Qwen2.5-0.5B-Instruct';
 const CONFIGS = [
   { label: 'WebGPU q4', device: 'webgpu', dtype: 'q4' },
   { label: 'WebGPU q8', device: 'webgpu', dtype: 'q8' },
+  { label: 'WASM q8', device: 'wasm', dtype: 'q8' },
   { label: 'WASM q4', device: 'wasm', dtype: 'q4' },
 ];
 const configsFor = (want) =>
