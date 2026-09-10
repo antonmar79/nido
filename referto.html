@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Nido · Analisi referto on-device</title>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<style>
+  body{font-family:system-ui;max-width:680px;margin:0 auto;padding:20px;background:#f6f4ef;color:#26221f}
+  h1{font-size:24px} .card{background:#fff;border:1px solid #e2ddd4;border-radius:14px;padding:16px;margin-top:14px}
+  #status{font-size:13px;color:#0a7272;font-weight:700;min-height:18px}
+  button{background:#0a7272;color:#fff;border:0;border-radius:10px;padding:12px 18px;font-size:14px;font-weight:700;cursor:pointer}
+  textarea,input[type=file]{width:100%;box-sizing:border-box;border:1px solid #d8d2c6;border-radius:10px;padding:10px;font-size:13px;font-family:inherit}
+  .badge{display:inline-block;padding:6px 12px;border-radius:999px;color:#fff;font-size:11px;font-weight:800}
+  .sec{margin-top:10px;padding:12px;border:1px solid #e2ddd4;border-radius:10px;background:#fbfaf7}
+  .sec h3{margin:0 0 6px;font-size:13px} .sec p{margin:0;font-size:14px;white-space:pre-line}
+  small.priv{display:block;margin-top:12px;color:#8a857d;font-size:11px}
+</style>
+</head>
+<body>
+<h1>🪺 Nido · Analisi referto</h1>
+<p><strong>Tutto accade in questo browser.</strong> La foto e il testo non vengono inviati a nessun server: puoi verificarlo in DevTools → Network.</p>
+
+<div class="card">
+  <input type="file" id="file" accept="image/*"><br><br>
+  <textarea id="paste" rows="3" placeholder="...oppure incolla qui il testo del referto"></textarea><br><br>
+  <button id="go">Analizza sul dispositivo</button>
+  <p id="status">In attesa.</p>
+</div>
+
+<div id="out"></div>
+
+<small class="priv">Prima analisi: scarica il modello (~350 MB, una volta sola, poi resta in cache). Il modello è pubblico (Hugging Face); i TUOI dati no: restano qui.</small>
+
+<script type="module">
+import { pipeline } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3';
+
+const $ = (id) => document.getElementById(id);
+const set = (t) => { $('status').textContent = t; };
+let gen = null, backend = '';
+
+async function loadModel() {
+  if (gen) return gen;
+  const model = 'onnx-community/Qwen2.5-0.5B-Instruct';
+  const cb = (p) => { if (p.status === 'progress' && p.total) set('Scarico modello: ' + Math.round(p.progress) + '%'); };
+  try {
+    set('Carico modello su WebGPU...');
+    gen = await pipeline('text-generation', model, { device: 'webgpu', dtype: 'q4', progress_callback: cb });
+    backend = 'WebGPU';
+  } catch (e) {
+    set('WebGPU non disponibile, uso WASM (più lento)...');
+    gen = await pipeline('text-generation', model, { device: 'wasm', dtype: 'q4', progress_callback: cb });
+    backend = 'WASM';
+  }
+  return gen;
+}
+
+async function ocr(file) {
+  const worker = await Tesseract.createWorker('ita', 1, { logger: m => { if (m.progress) set('OCR sul dispositivo: ' + Math.round(m.progress * 100) + '%'); } });
+  const { data } = await worker.recognize(file);
+  await worker.terminate();
+  return data.text || '';
+}
+
+function badge(docText) {
+  const t = docText.toLowerCase();
+  if (/urgenza|immediat|pronto soccorso/.test(t)) return ['CONTATTARE CON URGENZA', '#8a2d2d'];
+  if (/neurinoma|formazione nodulare|tumore|compressione midollare|neurochirurg|biopsia/.test(t)) return ['SENTIRE IL MEDICO', '#b45309'];
+  return ['DA ROUTINE', '#256245'];
+}
+
+function sections(txt) {
+  const names = ['Cosa descrive il referto', 'Deduzioni finali', 'Cosa fare adesso', 'Quando rivolgersi al pronto soccorso'];
+  const out = [];
+  for (const n of names) {
+    const re = new RegExp('\\*\\*' + n + '\\*\\*\\s*\\n([\\s\\S]+?)(?=\\n\\*\\*|$)');
+    const m = txt.match(re);
+    if (m) out.push([n, m[1].trim()]);
+  }
+  return out;
+}
+
+$('go').onclick = async () => {
+  try {
+    const file = $('file').files[0];
+    let doc = $('paste').value.trim();
+    if (file) doc = await ocr(file);
+    if (!doc.trim()) { set('Nessun testo leggibile: riprova con una foto più nitida.'); return; }
+
+    await loadModel();
+    set('Analisi in corso su ' + backend + '... (nessun dato esce dal dispositivo)');
+
+    const prompt = 'Sei un medico specialista italiano. Analizza questo referto in MASSIMO 300 parole, con 4 sezioni intitolate esattamente: **Cosa descrive il referto**, **Deduzioni finali**, **Cosa fare adesso**, **Quando rivolgersi al pronto soccorso**. Cita i termini medici ESATTI del referto senza riformularli. NON inventare sintomi. Referto:\n' + doc;
+
+    const out = await gen([{ role: 'user', content: prompt }], { max_new_tokens: 512, temperature: 0.2, top_p: 0.9 });
+    let txt = out[0].generated_text;
+    if (Array.isArray(txt)) txt = txt[txt.length - 1].content;
+
+    const [bLabel, bColor] = badge(doc);
+    let html = '<div class="card"><span class="badge" style="background:' + bColor + '">' + bLabel + '</span>';
+    for (const [h, b] of sections(txt)) html += '<div class="sec"><h3>' + h + '</h3><p>' + b.replace(/</g, '&lt;') + '</p></div>';
+    html += '<small class="priv">Backend: ' + backend + ' · Spiegazione informativa generata da AI sul tuo dispositivo: non sostituisce il medico.</small></div>';
+    $('out').innerHTML = html;
+    set('Fatto. Tutto elaborato localmente su ' + backend + '.');
+  } catch (e) {
+    set('Errore: ' + e.message);
+  }
+};
+</script>
+</body>
+</html>
